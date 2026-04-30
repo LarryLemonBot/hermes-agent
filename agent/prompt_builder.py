@@ -12,7 +12,7 @@ import threading
 from collections import OrderedDict
 from pathlib import Path
 
-from hermes_constants import get_hermes_home, get_skills_dir, is_wsl
+from hermes_constants import get_config_path, get_hermes_home, get_skills_dir, is_wsl
 from typing import Optional
 
 from agent.skill_utils import (
@@ -23,6 +23,7 @@ from agent.skill_utils import (
     iter_skill_index_files,
     parse_frontmatter,
     skill_matches_platform,
+    yaml_load,
 )
 from utils import atomic_json_write
 
@@ -500,6 +501,82 @@ _SKILLS_PROMPT_CACHE_MAX = 8
 _SKILLS_PROMPT_CACHE: OrderedDict[tuple, str] = OrderedDict()
 _SKILLS_PROMPT_CACHE_LOCK = threading.Lock()
 _SKILLS_SNAPSHOT_VERSION = 1
+_SKILLS_PROMPT_MODES = {"full", "compact", "off"}
+_SKILLS_PROMPT_MODE_ALIASES = {
+    "": "full",
+    "default": "full",
+    "normal": "full",
+    "lean": "compact",
+    "short": "compact",
+    "minimal": "compact",
+    "none": "off",
+    "disabled": "off",
+    "false": "off",
+}
+
+
+def _normalize_skills_prompt_mode(value: object) -> str:
+    """Normalize a configured skills prompt mode.
+
+    ``full`` preserves the historical inline skill index. ``compact`` keeps the
+    mandatory skill-use policy but replaces the large always-injected index with
+    instructions to discover skills through ``skills_list``/``skill_view``.
+    ``off`` suppresses the skills prompt entirely for explicitly opted-in
+    integrations.
+    """
+    if value is False:
+        return "off"
+    if value is True:
+        return "full"
+    raw = str(value or "").strip().lower()
+    mode = _SKILLS_PROMPT_MODE_ALIASES.get(raw, raw)
+    if mode in _SKILLS_PROMPT_MODES:
+        return mode
+    logger.debug("Ignoring unknown skills.prompt_mode=%r; using full", value)
+    return "full"
+
+
+def _get_skills_prompt_mode() -> str:
+    """Read ``skills.prompt_mode`` without importing the heavier CLI config stack."""
+    env_value = os.getenv("HERMES_SKILLS_PROMPT_MODE")
+    if env_value is not None:
+        return _normalize_skills_prompt_mode(env_value)
+
+    config_path = get_config_path()
+    if not config_path.exists():
+        return "full"
+    try:
+        parsed = yaml_load(config_path.read_text(encoding="utf-8"))
+    except Exception as e:
+        logger.debug("Could not read skills prompt mode from %s: %s", config_path, e)
+        return "full"
+    if not isinstance(parsed, dict):
+        return "full"
+    skills_cfg = parsed.get("skills")
+    if not isinstance(skills_cfg, dict):
+        return "full"
+    return _normalize_skills_prompt_mode(
+        skills_cfg.get("prompt_mode", skills_cfg.get("index_mode"))
+    )
+
+
+def _build_compact_skills_policy_prompt() -> str:
+    """Return the lean skills policy used when ``skills.prompt_mode=compact``."""
+    return (
+        "## Skills (mandatory)\n"
+        "Skills are available through the `skills_list`, `skill_view`, and "
+        "`skill_manage` tools, but the full catalog is intentionally not "
+        "always injected to reduce prompt bloat. For any non-trivial, "
+        "domain-specific, tool-specific, or user-preference-sensitive task, "
+        "discover relevant skills with `skills_list` (use a category filter "
+        "when obvious), then load the matching skill with `skill_view(name)` "
+        "before acting. Whenever the user asks to configure, set up, install, "
+        "enable, disable, modify, or troubleshoot Hermes Agent itself, load "
+        "`skill_view(name='hermes-agent')` first. If a loaded skill is stale "
+        "or wrong, patch it with `skill_manage(action='patch')`. After "
+        "difficult or reusable work, create/update a skill when appropriate. "
+        "Do not assume a skill is absent just because it is not listed here."
+    )
 
 
 def _skills_prompt_snapshot_path() -> Path:
@@ -675,6 +752,12 @@ def build_skills_system_prompt(
     if not skills_dir.exists() and not external_dirs:
         return ""
 
+    prompt_mode = _get_skills_prompt_mode()
+    if prompt_mode == "off":
+        return ""
+    if prompt_mode == "compact":
+        return _build_compact_skills_policy_prompt()
+
     # ── Layer 1: in-process LRU cache ─────────────────────────────────
     # Include the resolved platform so per-platform disabled-skill lists
     # produce distinct cache entries (gateway serves multiple platforms).
@@ -691,6 +774,7 @@ def build_skills_system_prompt(
         tuple(sorted(str(t) for t in (available_tools or set()))),
         tuple(sorted(str(ts) for ts in (available_toolsets or set()))),
         _platform_hint,
+        prompt_mode,
         tuple(sorted(disabled)),
     )
     with _SKILLS_PROMPT_CACHE_LOCK:

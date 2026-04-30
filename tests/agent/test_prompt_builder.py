@@ -266,6 +266,56 @@ class TestBuildSkillsSystemPrompt:
         assert "Debug Python scripts" in result
         assert "available_skills" in result
 
+    def test_compact_prompt_mode_omits_inline_skill_catalog(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        skills_dir = tmp_path / "skills" / "coding" / "python-debug"
+        skills_dir.mkdir(parents=True)
+        (skills_dir / "SKILL.md").write_text(
+            "---\nname: python-debug\ndescription: Debug Python scripts\n---\n"
+        )
+        (tmp_path / "config.yaml").write_text(
+            "skills:\n  prompt_mode: compact\n",
+            encoding="utf-8",
+        )
+
+        result = build_skills_system_prompt()
+
+        assert "Skills (mandatory)" in result
+        assert "skills_list" in result
+        assert "skill_view(name='hermes-agent')" in result
+        assert "python-debug" not in result
+        assert "available_skills" not in result
+
+    def test_compact_prompt_mode_has_env_alias(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        monkeypatch.setenv("HERMES_SKILLS_PROMPT_MODE", "lean")
+        skills_dir = tmp_path / "skills" / "coding" / "python-debug"
+        skills_dir.mkdir(parents=True)
+        (skills_dir / "SKILL.md").write_text(
+            "---\nname: python-debug\ndescription: Debug Python scripts\n---\n"
+        )
+
+        result = build_skills_system_prompt()
+
+        assert "skills_list" in result
+        assert "python-debug" not in result
+
+    def test_off_prompt_mode_suppresses_skills_prompt(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        skills_dir = tmp_path / "skills" / "coding" / "python-debug"
+        skills_dir.mkdir(parents=True)
+        (skills_dir / "SKILL.md").write_text(
+            "---\nname: python-debug\ndescription: Debug Python scripts\n---\n"
+        )
+        (tmp_path / "config.yaml").write_text(
+            "skills:\n  prompt_mode: off\n",
+            encoding="utf-8",
+        )
+
+        result = build_skills_system_prompt()
+
+        assert result == ""
+
     def test_deduplicates_skills(self, monkeypatch, tmp_path):
         monkeypatch.setenv("HERMES_HOME", str(tmp_path))
         cat_dir = tmp_path / "skills" / "tools"
